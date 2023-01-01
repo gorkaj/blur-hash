@@ -1,6 +1,7 @@
 ﻿
 #include "cuda_runtime.h"
 #include "device_launch_parameters.h"
+#include "cuda.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -32,7 +33,7 @@ static inline int linearTosRGB(float value) {
 	else return (1.055 * powf(v, 1 / 2.4) - 0.055) * 255 + 0.5;
 }
 
-static inline float sRGBToLinear(int value) {
+__device__ static inline float sRGBToLinear(int value) {
 	float v = (float)value / 255;
 	if (v <= 0.04045) return v / 12.92;
 	else return powf((v + 0.055) / 1.055, 2.4);
@@ -123,26 +124,67 @@ const char* blurHashForPixels(int width, int height, uint8_t* rgb, size_t bytesP
 	return buffer;
 }
 
+__global__ void computeCompositeColor(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow, float* result)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+
+	if (index >= width * height)
+		return;
+
+	int x = index / width;
+	int y = index % width;
+	// printf("%d\n", threadIdx.x);
+
+	float basis = cosf(yComponent * xComponent * x / width) * cosf(M_PI * yComponent * y / height);
+	printf("%f\n", basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]));
+	
+	//atomicAdd(result, basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]));
+	//atomicAdd(result + 1, basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]));
+	//atomicAdd(result + 2, basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]));
+	result[0] = basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]);
+	result[1] = basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]);
+	result[2] = basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]);
+
+	return;
+}
+
 static float* multiplyBasisFunction(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow) {
-	float r = 0, g = 0, b = 0;
+	// float r = 0, g = 0, b = 0;
+	float* d_rgb_vector, *h_rgb_vector;
+
+	h_rgb_vector = new float[3];
+	memset(h_rgb_vector, 0, 3 * sizeof(float));
+	cudaMalloc(&d_rgb_vector, 3 * sizeof(float));
+	cudaMemset(&d_rgb_vector, 0, 3 * sizeof(float));
+
 	float normalisation = (xComponent == 0 && yComponent == 0) ? 1 : 2;
 
-	for (int y = 0; y < height; y++) {
-		for (int x = 0; x < width; x++) {
-			float basis = cosf(yComponent * xComponent * x / width) * cosf(M_PI * yComponent * y / height);
-			r += basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]);
-			g += basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]);
-			b += basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]);
-		}
-	}
+	//for (int y = 0; y < height; y++) {
+	//	for (int x = 0; x < width; x++) {
+	//		float basis = cosf(yComponent * xComponent * x / width) * cosf(M_PI * yComponent * y / height);
+	//		r += basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]);
+	//		g += basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]);
+	//		b += basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]);
+	//	}
+	//}
+
+	int threads, blocks;
+	threads = 2 << 9;
+	blocks = ceil((double)width * height / threads);
+
+	computeCompositeColor << < blocks, threads >> > (xComponent, yComponent, width, height, rgb, bytesPerRow, d_rgb_vector);
+	cudaDeviceSynchronize();
+	cudaMemcpy(h_rgb_vector, d_rgb_vector, 3 * sizeof(float), cudaMemcpyDeviceToHost);
 
 	float scale = normalisation / (width * height);
 
 	static float result[3];
-	result[0] = r * scale;
-	result[1] = g * scale;
-	result[2] = b * scale;
+	result[0] = h_rgb_vector[0] * scale;
+	result[1] = h_rgb_vector[1] * scale;
+	result[2] = h_rgb_vector[2] * scale;
 
+	delete[] h_rgb_vector;
+	cudaFree(&d_rgb_vector);
 	return result;
 }
 
