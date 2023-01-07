@@ -16,15 +16,11 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-const char* blurHashForFile(const char* filename);
-const char* blurHashForPixels(int width, int height, uint8_t* rgb, size_t bytesPerRow);
-static float* multiplyBasisFunction(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow);
+const char* blurHashForFile(const char* filename, int xComponent, int yComponent);
+const char* blurHashForPixels(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow);
 static char* encode_int(int value, int length, char* destination);
 static int encodeDC(float r, float g, float b);
 static int encodeAC(float r, float g, float b, float maximumValue);
-
-const static int xComponents = 4;
-const static int yComponents = 3;
 
 // Utilities
 static inline int linearTosRGB(float value) {
@@ -46,12 +42,12 @@ static inline float signPow(float value, float exp) {
 // Main
 int main(int argc, char** argv)
 {
-	if (argc != 2) {
-		fprintf(stderr, "Usage: %s imagefile\n", argv[0]);
+	if (argc != 4) {
+		fprintf(stderr, "Usage: %s imagefile xComponents yComponents\n", argv[0]);
 		return 1;
 	}
 
-	const char* hash = blurHashForFile(argv[1]);
+	const char* hash = blurHashForFile(argv[1], atoi(argv[2]), atoi(argv[3]));
 	if (!hash) {
 		fprintf(stderr, "Failed to load image file \"%s\".\n", argv[3]);
 		return 1;
@@ -62,32 +58,86 @@ int main(int argc, char** argv)
 	return 0;
 }
 
-const char* blurHashForFile(const char* filename) {
+__global__ void computeHash(int yComponents, int xComponents, int width, int height, uint8_t* d_rgb, size_t bytesPerRow, float* d_factors)
+{
+	int index = blockIdx.x * blockDim.x + threadIdx.x;
+	if (index >= width * height)
+		return;
+
+	int x = index % width;
+	int y = index / width;
+
+	for (int i = 0; i < yComponents; i++)
+	{
+		for (int j = 0; j < xComponents; j++)
+		{
+			float basis = cosf(i * j * x / width) * cosf(M_PI * i * y / height);
+			float normalisation = (j == 0 && i == 0) ? 1 : 2;
+			float scale = normalisation / (width * height);
+			/*atomicAdd(d_factors + i * xComponents * 3 + j * 3, scale * basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]));
+			atomicAdd(d_factors + i * xComponents * 3 + j * 3 + 1, scale * basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]));
+			atomicAdd(d_factors + i * xComponents * 3 + j * 3 + 2, scale * basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]));*/
+			//d_factors[i * xComponents * 3 + j * 3] = scale * basis * sRGBToLinear(d_rgb[3 * x + 0 + y * bytesPerRow]);
+			//d_factors[i * xComponents * 3 + j * 3 + 1] = scale * basis * sRGBToLinear(d_rgb[3 * x + 1 + y * bytesPerRow]);
+			//d_factors[i * xComponents * 3 + j * 3 + 2] = scale * basis * sRGBToLinear(d_rgb[3 * x + 2 + y * bytesPerRow]);
+
+			atomicAdd(d_factors + i * xComponents * 3 + j * 3, scale * basis * sRGBToLinear(d_rgb[3 * x + 0 + y * bytesPerRow]));
+			atomicAdd(d_factors + i * xComponents * 3 + j * 3 + 1, scale * basis * sRGBToLinear(d_rgb[3 * x + 1 + y * bytesPerRow]));
+			atomicAdd(d_factors + i * xComponents * 3 + j * 3 + 2, scale * basis * sRGBToLinear(d_rgb[3 * x + 2 + y * bytesPerRow]));
+		}
+	}
+}
+
+const char* blurHashForFile(const char* filename, int yComponents, int xComponents) {
 	int width, height, channels;
 	unsigned char* data = stbi_load(filename, &width, &height, &channels, 3);
 	if (!data) return NULL;
 
-	const char* hash = blurHashForPixels(width, height, data, width * 3);
+	const char* hash = blurHashForPixels(yComponents, xComponents, width, height, data, width * 3);
 
 	stbi_image_free(data);
 
 	return hash;
 }
 
-const char* blurHashForPixels(int width, int height, uint8_t* rgb, size_t bytesPerRow) {
+const char* blurHashForPixels(int yComponents, int xComponents, int width, int height, uint8_t* rgb, size_t bytesPerRow) {
 	static char buffer[2 + 4 + (9 * 9 - 1) * 2 + 1];
 
-	float factors[yComponents][xComponents][3];
-	memset(factors, 0, sizeof(factors));
+	float* allElements = (float*)malloc(yComponents * xComponents * 3 * sizeof(float));
+	float*** factors = (float***)malloc(yComponents * sizeof(float**));
 
-	for (int y = 0; y < yComponents; y++) {
-		for (int x = 0; x < xComponents; x++) {
-			float* factor = multiplyBasisFunction(x, y, width, height, rgb, bytesPerRow);
-			factors[y][x][0] = factor[0];
-			factors[y][x][1] = factor[1];
-			factors[y][x][2] = factor[2];
+	if (!allElements || !factors)
+		return nullptr;
+
+	for (int i = 0; i < yComponents; i++)
+	{
+		*(factors + i) = (float**)malloc(xComponents * sizeof(float*));
+		if (!(factors + i))
+			return nullptr;
+
+		for (int j = 0; j < xComponents; j++)
+		{
+			factors[i][j] = allElements + (i * xComponents * 3) + (j * 3);
 		}
 	}
+
+	memset(allElements, 0, yComponents * xComponents * 3 * sizeof(float));
+
+	float* d_allElements;
+	cudaMalloc(&d_allElements, yComponents * xComponents * 3 * sizeof(float));
+	cudaMemset(d_allElements, 0, yComponents * xComponents * 3 * sizeof(float));
+
+	uint8_t* d_rgb;
+	cudaMalloc(&d_rgb, 3 * width * height * sizeof(uint8_t));
+	cudaMemcpy(d_rgb, rgb, 3 * width * height * sizeof(uint8_t), cudaMemcpyHostToDevice);
+
+	int threads, blocks;
+	threads = 2 << 9;
+	blocks = ceil((double)width * height / threads);
+	computeHash << <blocks, threads >> > (yComponents, xComponents, width, height, d_rgb, bytesPerRow, d_allElements);
+
+	cudaDeviceSynchronize();
+	cudaMemcpy(allElements, d_allElements, yComponents * xComponents * 3 * sizeof(float), cudaMemcpyDeviceToHost);
 
 	float* dc = factors[0][0];
 	float* ac = dc + 3;
@@ -120,72 +170,16 @@ const char* blurHashForPixels(int width, int height, uint8_t* rgb, size_t bytesP
 	}
 
 	*ptr = 0;
+	free(allElements);
+	for (int i = 0; i < yComponents; i++)
+	{
+		free(factors[i]);
+	}
+	free(factors);
+	cudaFree(d_allElements);
+	cudaFree(d_rgb);
 
 	return buffer;
-}
-
-__global__ void computeCompositeColor(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow, float* result)
-{
-	int index = blockIdx.x * blockDim.x + threadIdx.x;
-
-	if (index >= width * height)
-		return;
-
-	int x = index / width;
-	int y = index % width;
-	// printf("%d\n", threadIdx.x);
-
-	float basis = cosf(yComponent * xComponent * x / width) * cosf(M_PI * yComponent * y / height);
-	printf("%f\n", basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]));
-	
-	//atomicAdd(result, basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]));
-	//atomicAdd(result + 1, basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]));
-	//atomicAdd(result + 2, basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]));
-	result[0] = basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]);
-	result[1] = basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]);
-	result[2] = basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]);
-
-	return;
-}
-
-static float* multiplyBasisFunction(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow) {
-	// float r = 0, g = 0, b = 0;
-	float* d_rgb_vector, *h_rgb_vector;
-
-	h_rgb_vector = new float[3];
-	memset(h_rgb_vector, 0, 3 * sizeof(float));
-	cudaMalloc(&d_rgb_vector, 3 * sizeof(float));
-	cudaMemset(&d_rgb_vector, 0, 3 * sizeof(float));
-
-	float normalisation = (xComponent == 0 && yComponent == 0) ? 1 : 2;
-
-	//for (int y = 0; y < height; y++) {
-	//	for (int x = 0; x < width; x++) {
-	//		float basis = cosf(yComponent * xComponent * x / width) * cosf(M_PI * yComponent * y / height);
-	//		r += basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]);
-	//		g += basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]);
-	//		b += basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]);
-	//	}
-	//}
-
-	int threads, blocks;
-	threads = 2 << 9;
-	blocks = ceil((double)width * height / threads);
-
-	computeCompositeColor << < blocks, threads >> > (xComponent, yComponent, width, height, rgb, bytesPerRow, d_rgb_vector);
-	cudaDeviceSynchronize();
-	cudaMemcpy(h_rgb_vector, d_rgb_vector, 3 * sizeof(float), cudaMemcpyDeviceToHost);
-
-	float scale = normalisation / (width * height);
-
-	static float result[3];
-	result[0] = h_rgb_vector[0] * scale;
-	result[1] = h_rgb_vector[1] * scale;
-	result[2] = h_rgb_vector[2] * scale;
-
-	delete[] h_rgb_vector;
-	cudaFree(&d_rgb_vector);
-	return result;
 }
 
 static int encodeDC(float r, float g, float b) {
