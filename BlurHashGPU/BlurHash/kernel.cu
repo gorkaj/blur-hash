@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <math.h>
 #include <cmath>
+#include <chrono>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -47,13 +48,19 @@ int main(int argc, char** argv)
 		return 1;
 	}
 
+	auto start = std::chrono::high_resolution_clock::now();
+
 	const char* hash = blurHashForFile(argv[1], atoi(argv[2]), atoi(argv[3]));
 	if (!hash) {
 		fprintf(stderr, "Failed to load image file \"%s\".\n", argv[3]);
 		return 1;
 	}
 
+	auto stop = std::chrono::high_resolution_clock::now();
+	auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
+
 	printf("%s\n", hash);
+	printf("\n\nTime elapsed: %d ms\n", duration.count());
 
 	return 0;
 }
@@ -71,15 +78,9 @@ __global__ void computeHash(int yComponents, int xComponents, int width, int hei
 	{
 		for (int j = 0; j < xComponents; j++)
 		{
-			float basis = cosf(i * j * x / width) * cosf(M_PI * i * y / height);
+			float basis = cosf(M_PI * j * x / width) * cosf(M_PI * i * y / height);
 			float normalisation = (j == 0 && i == 0) ? 1 : 2;
 			float scale = normalisation / (width * height);
-			/*atomicAdd(d_factors + i * xComponents * 3 + j * 3, scale * basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]));
-			atomicAdd(d_factors + i * xComponents * 3 + j * 3 + 1, scale * basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]));
-			atomicAdd(d_factors + i * xComponents * 3 + j * 3 + 2, scale * basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]));*/
-			//d_factors[i * xComponents * 3 + j * 3] = scale * basis * sRGBToLinear(d_rgb[3 * x + 0 + y * bytesPerRow]);
-			//d_factors[i * xComponents * 3 + j * 3 + 1] = scale * basis * sRGBToLinear(d_rgb[3 * x + 1 + y * bytesPerRow]);
-			//d_factors[i * xComponents * 3 + j * 3 + 2] = scale * basis * sRGBToLinear(d_rgb[3 * x + 2 + y * bytesPerRow]);
 
 			atomicAdd(d_factors + i * xComponents * 3 + j * 3, scale * basis * sRGBToLinear(d_rgb[3 * x + 0 + y * bytesPerRow]));
 			atomicAdd(d_factors + i * xComponents * 3 + j * 3 + 1, scale * basis * sRGBToLinear(d_rgb[3 * x + 1 + y * bytesPerRow]));

@@ -3,7 +3,6 @@
 #include <cstdint>
 #include <math.h>
 #include <cmath>
-#include <chrono>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -12,16 +11,15 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#pragma warning(disable:6385)
-#pragma warning(disable:6386)
-#pragma warning(disable:6011)
-
-const char* blurHashForFile(const char* filename, int xComponents, int yComponents);
-const char* blurHashForPixels(int xComponents, int yComponents, int width, int height, uint8_t* rgb, size_t bytesPerRow);
+const char* blurHashForFile(const char* filename);
+const char* blurHashForPixels(int width, int height, uint8_t* rgb, size_t bytesPerRow);
 static float* multiplyBasisFunction(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow);
 static char* encode_int(int value, int length, char* destination);
 static int encodeDC(float r, float g, float b);
 static int encodeAC(float r, float g, float b, float maximumValue);
+
+const static int xComponents = 4;
+const static int yComponents = 3;
 
 // Utilities
 static inline int linearTosRGB(float value) {
@@ -43,62 +41,39 @@ static inline float signPow(float value, float exp) {
 // Main
 int main(int argc, char** argv)
 {
-	if (argc != 4) {
-		fprintf(stderr, "Usage: %s imagefile xComponents yComponents\n", argv[0]);
+	if (argc != 2) {
+		fprintf(stderr, "Usage: %s imagefile\n", argv[0]);
 		return 1;
 	}
 
-	auto start = std::chrono::high_resolution_clock::now();
-
-	const char* hash = blurHashForFile(argv[1], atoi(argv[2]), atoi(argv[3]));
+	const char* hash = blurHashForFile(argv[1]);
 	if (!hash) {
 		fprintf(stderr, "Failed to load image file \"%s\".\n", argv[3]);
 		return 1;
 	}
 
-	auto stop = std::chrono::high_resolution_clock::now();
-	auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(stop - start);
-
 	printf("%s\n", hash);
-	printf("\n\nTime elapsed: %d ms\n", duration.count());
 
 	return 0;
 }
 
-const char* blurHashForFile(const char* filename, int xComponents, int yComponents) {
+const char* blurHashForFile(const char* filename) {
 	int width, height, channels;
 	unsigned char* data = stbi_load(filename, &width, &height, &channels, 3);
 	if (!data) return NULL;
 
-	const char* hash = blurHashForPixels(xComponents, yComponents, width, height, data, width * 3);
+	const char* hash = blurHashForPixels(width, height, data, width * 3);
 
 	stbi_image_free(data);
 
 	return hash;
 }
 
-const char* blurHashForPixels(int xComponents, int yComponents, int width, int height, uint8_t* rgb, size_t bytesPerRow) {
+const char* blurHashForPixels(int width, int height, uint8_t* rgb, size_t bytesPerRow) {
 	static char buffer[2 + 4 + (9 * 9 - 1) * 2 + 1];
 
-	float* allElements = (float*)malloc(yComponents * xComponents * 3 * sizeof(float));
-	float*** factors = (float***)malloc(yComponents * sizeof(float**));
-
-	if (!allElements || !factors)
-		return nullptr;
-
-	for (int i = 0; i < yComponents; i++)
-	{
-		*(factors + i) = (float**)malloc(xComponents * sizeof(float*));
-		if (!(factors + i))
-			return nullptr;
-
-		for (int j = 0; j < xComponents; j++)
-		{
-			factors[i][j] = allElements + (i * xComponents * 3) + (j * 3);
-		}
-	}
-
-	memset(allElements, 0, yComponents * xComponents * 3 * sizeof(float));
+	float factors[yComponents][xComponents][3];
+	memset(factors, 0, sizeof(factors));
 
 	for (int y = 0; y < yComponents; y++) {
 		for (int x = 0; x < xComponents; x++) {
@@ -140,12 +115,6 @@ const char* blurHashForPixels(int xComponents, int yComponents, int width, int h
 	}
 
 	*ptr = 0;
-	free(allElements);
-	for (int i = 0; i < yComponents; i++)
-	{
-		free(factors[i]);
-	}
-	free(factors);
 
 	return buffer;
 }
@@ -172,6 +141,8 @@ static float* multiplyBasisFunction(int xComponent, int yComponent, int width, i
 
 	return result;
 }
+
+
 
 static int encodeDC(float r, float g, float b) {
 	int roundedR = linearTosRGB(r);
