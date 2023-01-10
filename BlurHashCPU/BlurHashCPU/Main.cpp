@@ -11,10 +11,6 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-#pragma warning(disable:6385)
-#pragma warning(disable:6386)
-#pragma warning(disable:6011)
-
 const char* blurHashForFile(const char* filename);
 const char* blurHashForPixels(int width, int height, uint8_t* rgb, size_t bytesPerRow);
 static float* multiplyBasisFunction(int xComponent, int yComponent, int width, int height, uint8_t* rgb, size_t bytesPerRow);
@@ -46,7 +42,7 @@ static inline float signPow(float value, float exp) {
 int main(int argc, char** argv)
 {
 	if (argc != 4) {
-		fprintf(stderr, "Usage: %s imagefile xComponents yComponents\n", argv[0]);
+		fprintf(stderr, "Usage: %s imagefile\n", argv[0]);
 		return 1;
 	}
 
@@ -129,7 +125,7 @@ static float* multiplyBasisFunction(int xComponent, int yComponent, int width, i
 
 	for (int y = 0; y < height; y++) {
 		for (int x = 0; x < width; x++) {
-			float basis = cosf(yComponent * xComponent * x / width) * cosf(M_PI * yComponent * y / height);
+			float basis = cosf(M_PI * xComponent * x / width) * cosf(M_PI * yComponent * y / height);
 			r += basis * sRGBToLinear(rgb[3 * x + 0 + y * bytesPerRow]);
 			g += basis * sRGBToLinear(rgb[3 * x + 1 + y * bytesPerRow]);
 			b += basis * sRGBToLinear(rgb[3 * x + 2 + y * bytesPerRow]);
@@ -145,6 +141,8 @@ static float* multiplyBasisFunction(int xComponent, int yComponent, int width, i
 
 	return result;
 }
+
+
 
 static int encodeDC(float r, float g, float b) {
 	int roundedR = linearTosRGB(r);
